@@ -31,7 +31,10 @@ class GcdConnector:
             client_id,
             client_secret,
             token_file,
-            scopes=DEFAULT_SCOPES):
+            scopes=DEFAULT_SCOPES,
+            session=None):
+
+        self.session = session or aiohttp.ClientSession(raise_for_status=True)
 
         self.project_id = project_id
         self._token = Token(
@@ -166,24 +169,15 @@ class GcdConnector:
             'mode': 'NON_TRANSACTIONAL',
             'mutations': mutations
         }
-        async with aiohttp.ClientSession() as session:
 
-            async with session.post(
-                    self._commit_url,
-                    data=json.dumps(data),
-                    headers=await self._get_headers()) as resp:
+        async with self.session.post(
+                self._commit_url,
+                data=json.dumps(data),
+                headers=await self._get_headers()) as resp:
 
-                content = await resp.json()
+            content = await resp.json()
 
-                if resp.status == 200:
-                    return tuple(content.get('mutationResults', tuple()))
-
-                raise ValueError(
-                        'Error while committing to the datastore: {} ({})'
-                        .format(
-                            content.get('error', 'unknown'),
-                            resp.status
-                        ))
+        return tuple(content.get('mutationResults', tuple()))
 
     async def run_query(self, data):
         """Return entities by given query data.
@@ -196,48 +190,36 @@ class GcdConnector:
         results = []
         start_cursor = None
         while True:
-            async with aiohttp.ClientSession() as session:
+            if start_cursor is not None:
+                data['query']['startCursor'] = start_cursor
 
-                if start_cursor is not None:
-                    data['query']['startCursor'] = start_cursor
+            async with self.session.post(
+                    self._run_query_url,
+                    data=json.dumps(data),
+                    headers=await self._get_headers()) as resp:
 
-                async with session.post(
-                        self._run_query_url,
-                        data=json.dumps(data),
-                        headers=await self._get_headers()) as resp:
+                content = await resp.json()
 
-                    content = await resp.json()
+            entity_results = \
+                content['batch'].get('entityResults', [])
 
-                    if resp.status == 200:
+            results.extend(entity_results)
 
-                        entity_results = \
-                            content['batch'].get('entityResults', [])
+            more_results = content['batch']['moreResults']
 
-                        results.extend(entity_results)
+            if more_results in (
+                    'NO_MORE_RESULTS',
+                    'MORE_RESULTS_AFTER_LIMIT',
+                    'MORE_RESULTS_AFTER_CURSOR'):
+                break
 
-                        more_results = content['batch']['moreResults']
+            if more_results == 'NOT_FINISHED':
+                start_cursor = content['batch']['endCursor']
+                continue
 
-                        if more_results in (
-                                'NO_MORE_RESULTS',
-                                'MORE_RESULTS_AFTER_LIMIT',
-                                'MORE_RESULTS_AFTER_CURSOR'):
-                            break
-
-                        if more_results == 'NOT_FINISHED':
-                            start_cursor = content['batch']['endCursor']
-                            continue
-
-                        raise ValueError(
-                            'Unexpected value for "moreResults": {}'
-                            .format(more_results))
-
-                    raise ValueError(
-                        'Error while query the datastore: {} ({})'
-                        .format(
-                            content.get('error', 'unknown'),
-                            resp.status
-                        )
-                    )
+            raise ValueError(
+                'Unexpected value for "moreResults": {}'
+                .format(more_results))
 
         return results
 
@@ -292,7 +274,8 @@ class GcdConnector:
         :return: list of Entity objects or None.
         """
         read_options = make_read_options(eventual=eventual)
-        data = lambda: json.dumps({
+
+        def data(): return json.dumps({
             'readOptions': read_options,
             'keys': [k.get_dict() for k in keys],
         })
@@ -307,28 +290,28 @@ class GcdConnector:
         entities = []
         while keys and attempts < _MAX_LOOPS:
             attempts += 1
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                        self._lookup_url,
-                        data=data(),
-                        headers=await self._get_headers()) as resp:
+            async with self.session.post(
+                    self._lookup_url,
+                    data=data(),
+                    headers=await self._get_headers()) as resp:
 
-                    content = await resp.json()
-                    entities.extend(Entity(result['entity']) for result in
-                                    content.get('found', []))
+                content = await resp.json()
 
-                    if missing is not None:
-                        missing.extend(result['entity'] for result in
-                                       content.get('missing', []))
+            entities.extend(Entity(result['entity']) for result in
+                            content.get('found', []))
 
-                    deferred_keys = [Key(result) for result in
-                                     content.get('deferred', [])]
+            if missing is not None:
+                missing.extend(result['entity'] for result in
+                               content.get('missing', []))
 
-                    if deferred is not None:
-                        deferred.extend(deferred_keys)
-                        break
+            deferred_keys = [Key(result) for result in
+                             content.get('deferred', [])]
 
-                    keys = deferred_keys
+            if deferred is not None:
+                deferred.extend(deferred_keys)
+                break
+
+            keys = deferred_keys
 
         if entities:
             return entities
@@ -385,6 +368,7 @@ class GcdServiceAccountConnector(GcdConnector):
 
         scopes = scopes or list(DEFAULT_SCOPES)
         self.project_id = project_id
+        self.session = session or aiohttp.ClientSession(raise_for_status=True)
         self._token = ServiceAccountToken(project_id, service_file, scopes,
                                           session)
 
