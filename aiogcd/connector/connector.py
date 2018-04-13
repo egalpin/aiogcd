@@ -175,6 +175,7 @@ class GcdConnector:
                 data=json.dumps(data),
                 headers=await self._get_headers()) as resp:
 
+            resp.raise_for_status()
             content = await resp.json()
 
         return tuple(content.get('mutationResults', tuple()))
@@ -198,6 +199,7 @@ class GcdConnector:
                     data=json.dumps(data),
                     headers=await self._get_headers()) as resp:
 
+                resp.raise_for_status()
                 content = await resp.json()
 
             entity_results = \
@@ -295,6 +297,7 @@ class GcdConnector:
                     data=data(),
                     headers=await self._get_headers()) as resp:
 
+                resp.raise_for_status()
                 content = await resp.json()
 
             entities.extend(Entity(result['entity']) for result in
